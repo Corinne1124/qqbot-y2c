@@ -1,0 +1,16 @@
+name = "qqbot-y2c"
+main = "src/index.ts"
+compatibility_date = "2025-12-01"
+
+# 如果需要 KV 存储 access_token 或会话状态，取消注释并填入 KV namespace ID
+# [[kv_namespaces]]
+# binding = "KV"
+# id = "your_kv_id_here"
+
+# 以下变量通过 wrangler secret 设置，不要写在文件中
+# QQ_APP_ID
+# QQ_APP_SECRET
+# BOT_SECRET
+
+[env.production]
+vars = { ENVIRONMENT = "production" }
