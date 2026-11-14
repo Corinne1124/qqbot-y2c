@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "secrets:push": "wrangler secret bulk .dev.vars",
     "tail": "wrangler tail",
     "build": "echo 'Build step is not required for now.'"
   },

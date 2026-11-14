@@ -6,7 +6,7 @@
 export interface Env {
   QQ_APP_ID: string;        // 机器人 ID（AppID）
   QQ_APP_SECRET: string;    // 仅用于换取 access_token（OAuth client_secret）
-  QQ_BOT_SECRET: string;    // Webhook 验签 / 回调校验签名用的 Ed25519 种子
+  QQ_BOT_SECRET?: string;   // Webhook 验签 / 回调校验签名用的 Ed25519 种子，缺省回退到 QQ_APP_SECRET
   ENVIRONMENT?: string;     // wrangler.toml 中的环境标记，可选
   KV?: KVNamespace;
 }
@@ -72,6 +72,12 @@ function bytesToHex(buf: ArrayBuffer): string {
   return Array.from(new Uint8Array(buf))
     .map(b => b.toString(16).padStart(2, '0'))
     .join('');
+}
+
+/** 密钥指纹（SHA-256 前 12 位十六进制），用于比对部署的密钥是否与本地一致，不泄露密钥本身 */
+async function fingerprint(secret: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret));
+  return bytesToHex(digest).slice(0, 12);
 }
 
 /**
@@ -244,28 +250,15 @@ export default {
       return new Response('Not Found', { status: 404 });
     }
 
-    if (!env.QQ_BOT_SECRET) {
-      console.error('QQ_BOT_SECRET is not configured');
+    // 验签密钥：优先 QQ_BOT_SECRET；部分机器人（如只发放 AppSecret 的）回退到 QQ_APP_SECRET
+    const botSecret = env.QQ_BOT_SECRET || env.QQ_APP_SECRET;
+    if (!botSecret) {
+      console.error('Neither QQ_BOT_SECRET nor QQ_APP_SECRET is configured');
       return new Response('Server misconfigured', { status: 500 });
     }
 
     // 重要：先读取原始 body，不要提前 JSON.parse
     const rawBody = await request.text();
-
-    // 派生密钥（使用 Bot Secret，而不是 App Secret）
-    const privateKey = await derivePrivateKey(env.QQ_BOT_SECRET);
-    const publicKey = await derivePublicKey(privateKey);
-
-    // 获取签名头
-    const timestamp = request.headers.get('X-Signature-Timestamp');
-    const sigHex = request.headers.get('X-Signature-Ed25519');
-
-    // 验签（正常事件与回调地址校验都要验签）
-    const isValid = await verifySignature(rawBody, timestamp, sigHex, publicKey);
-    if (!isValid) {
-      console.error('Signature verification failed');
-      return new Response('Invalid signature', { status: 403 });
-    }
 
     let payload: any;
     try {
@@ -278,7 +271,10 @@ export default {
       return new Response('Invalid payload', { status: 400 });
     }
 
-    // 回调地址验证 (op=13)
+    // 派生私钥
+    const privateKey = await derivePrivateKey(botSecret);
+
+    // 回调地址验证 (op=13)：平台该请求不带 X-Signature-* 头，只要求返回签名
     if (payload.op === 13) {
       const { plain_token, event_ts } = payload.d ?? {};
       if (!plain_token || !event_ts) {
@@ -286,6 +282,25 @@ export default {
       }
       const signature = await signForChallenge(event_ts + plain_token, privateKey);
       return Response.json({ plain_token, signature });
+    }
+
+    // 其余请求（事件推送）必须验签
+    const timestamp = request.headers.get('X-Signature-Timestamp');
+    const sigHex = request.headers.get('X-Signature-Ed25519');
+    const publicKey = await derivePublicKey(privateKey);
+    if (!(await verifySignature(rawBody, timestamp, sigHex, publicKey))) {
+      // 只打印非敏感信息，便于和本地 .dev.vars 的 fingerprint 对照，确认部署的密钥是否正确
+      console.error('Signature verification failed', {
+        op: payload.op,
+        appIdHeader: request.headers.get('X-Bot-Appid'),
+        hasTimestamp: Boolean(timestamp),
+        hasSignature: Boolean(sigHex),
+        signatureLength: sigHex?.length ?? 0,
+        bodyLength: rawBody.length,
+        secretLength: botSecret.length,
+        secretFingerprint: await fingerprint(botSecret),
+      });
+      return new Response('Invalid signature', { status: 403 });
     }
 
     // 正常事件 (op=0)
