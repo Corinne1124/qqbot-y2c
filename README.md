@@ -106,6 +106,37 @@ curl -i -X POST https://qqbot-y2c.pages.dev/qq/webhook ^
 - 两种方式同时配置时，方式 B 会在每次推送时覆盖 Cloudflare 上的值，改密钥请以 GitHub 为准。
 - 方式 B 未配置时，`Sync secrets to Cloudflare Pages` 步骤会自动跳过，不影响部署。
 
+## 调试与日志
+
+`wrangler pages deployment tail` 依赖 `tail.developers.workers.dev`，国内网络无法访问，
+因此内置了一个不依赖 tail 的调试接口 `/qq/debug`。
+
+配置（全部在 Dashboard 完成）：
+
+1. Workers & Pages → KV → 创建命名空间，例如 `qqbot-y2c-kv`
+2. Pages 项目 → Settings → Functions → KV namespace bindings → 变量名填 `KV`，绑定上面的命名空间（Production）
+3. Pages 项目 → Settings → Environment variables → 添加**加密**变量 `DEBUG_KEY`，值用一串随机字符串（Production）
+4. 重新部署后访问：
+
+```
+https://qqbot-y2c.pages.dev/qq/debug?key=<你的 DEBUG_KEY>
+```
+
+返回内容包含：
+
+| 字段 | 含义 |
+|---|---|
+| `events` | 最近 10 条事件（含 `type`、`msgId`、`target`、`ok`、`status`、`detail`）；未绑定 KV 时为 `null` |
+| `secretFingerprint` | 部署所用验签密钥的指纹，用于和本地 `.dev.vars` 比对 |
+| `token` | 加 `&selftest=1` 时出现，测试 access_token 能否获取（会返回错误信息） |
+
+判读方式：
+
+- `events` 一直是空数组 → 平台没有推送事件（事件未勾选 / 沙箱测试号未添加 / 群消息没 @）
+- `events` 有记录但 `ok: false` → 发送被平台拒绝，看 `detail` 里的 `err_code`
+- `events` 有记录且 `ok: true` → 消息已请求成功发出，问题在 QQ 客户端侧
+- `invalid_client` 之类 → AppID / AppSecret 配置错误
+
 ## 目录结构
 
 ```

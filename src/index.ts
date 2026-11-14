@@ -8,6 +8,7 @@ export interface Env {
   QQ_APP_SECRET: string;    // 仅用于换取 access_token（OAuth client_secret）
   QQ_BOT_SECRET?: string;   // Webhook 验签 / 回调校验签名用的 Ed25519 种子，缺省回退到 QQ_APP_SECRET
   ENVIRONMENT?: string;     // wrangler.toml 中的环境标记，可选
+  DEBUG_KEY?: string;       // 调试接口 /qq/debug 的访问密钥，未设置时该接口不可用
   KV?: KVNamespace;
 }
 
@@ -174,16 +175,50 @@ function nextMsgSeq(msgId: string): number {
   return next;
 }
 
+/** 调试记录：写入 KV 的最近事件，便于在无法使用 wrangler tail 的环境里排查 */
+interface DebugEntry {
+  ts: string;
+  type: string;
+  msgId?: string;
+  target?: string;
+  content?: string;
+  ok?: boolean;
+  status?: number;
+  detail?: string;
+  error?: string;
+}
+
+const DEBUG_EVENT_LIMIT = 10;
+
+async function recordDebug(env: Env, entry: DebugEntry): Promise<void> {
+  if (!env.KV) return;
+  try {
+    const prevRaw = await env.KV.get('debug:events');
+    const prev: DebugEntry[] = prevRaw ? JSON.parse(prevRaw) : [];
+    prev.unshift(entry);
+    await env.KV.put('debug:events', JSON.stringify(prev.slice(0, DEBUG_EVENT_LIMIT)), {
+      expirationTtl: 86400,
+    });
+  } catch (e) {
+    console.error('recordDebug failed:', String(e));
+  }
+}
+
+interface SendResult {
+  ok: boolean;
+  status: number;
+  detail?: string;
+}
+
 /**
  * 发送消息（被动回复必须带 msg_id 与 msg_seq）
- * @returns 是否发送成功
  */
 async function postMessage(
   apiPath: string,
   content: string,
   msgId: string | undefined,
   token: string
-): Promise<boolean> {
+): Promise<SendResult> {
   const body: Record<string, unknown> = { content, msg_type: 0 };
   if (msgId) {
     body.msg_id = msgId;
@@ -200,9 +235,9 @@ async function postMessage(
   if (!resp.ok) {
     const detail = await resp.text().catch(() => '');
     console.error(`Send message failed (${resp.status} ${resp.statusText}): ${detail}`);
-    return false;
+    return { ok: false, status: resp.status, detail: detail.slice(0, 500) };
   }
-  return true;
+  return { ok: true, status: resp.status };
 }
 
 function sendC2CMessage(
@@ -210,7 +245,7 @@ function sendC2CMessage(
   content: string,
   msgId: string | undefined,
   token: string
-): Promise<boolean> {
+): Promise<SendResult> {
   return postMessage(`/v2/users/${encodeURIComponent(openid)}/messages`, content, msgId, token);
 }
 
@@ -219,7 +254,7 @@ function sendGroupMessage(
   content: string,
   msgId: string | undefined,
   token: string
-): Promise<boolean> {
+): Promise<SendResult> {
   return postMessage(`/v2/groups/${encodeURIComponent(groupOpenid)}/messages`, content, msgId, token);
 }
 
@@ -227,25 +262,30 @@ function sendGroupMessage(
 
 async function handleEvent(eventType: string, d: any, env: Env) {
   const msgId = d?.id as string | undefined;
+  const ts = new Date().toISOString();
   try {
     const token = await getAccessToken(env);
     const content = String(d?.content ?? '').replace(/<@!?\d+>/g, '').trim();
     if (eventType === 'C2C_MESSAGE_CREATE') {
       const openid = d?.author?.user_openid;
       if (!openid) throw new Error('missing d.author.user_openid');
-      const ok = await sendC2CMessage(openid, `你说了：${content}`, msgId, token);
-      if (ok) console.log('replied C2C', { msgId, openid });
-      else console.error('Failed to reply C2C message', { msgId, openid });
+      const result = await sendC2CMessage(openid, `你说了：${content}`, msgId, token);
+      await recordDebug(env, { ts, type: eventType, msgId, target: openid, content, ...result });
+      if (result.ok) console.log('replied C2C', { msgId, openid });
+      else console.error('Failed to reply C2C message', { msgId, openid, detail: result.detail });
     } else if (eventType === 'GROUP_AT_MESSAGE_CREATE') {
       const groupOpenid = d?.group_openid;
       if (!groupOpenid) throw new Error('missing d.group_openid');
-      const ok = await sendGroupMessage(groupOpenid, `你在群里说：${content}`, msgId, token);
-      if (ok) console.log('replied GROUP', { msgId, groupOpenid });
-      else console.error('Failed to reply group message', { msgId, groupOpenid });
+      const result = await sendGroupMessage(groupOpenid, `你在群里说：${content}`, msgId, token);
+      await recordDebug(env, { ts, type: eventType, msgId, target: groupOpenid, content, ...result });
+      if (result.ok) console.log('replied GROUP', { msgId, groupOpenid });
+      else console.error('Failed to reply group message', { msgId, groupOpenid, detail: result.detail });
     } else {
+      await recordDebug(env, { ts, type: eventType, msgId, content });
       console.log('ignore event type', eventType);
     }
   } catch (e) {
+    await recordDebug(env, { ts, type: eventType, msgId, content: String(d?.content ?? ''), error: String(e) });
     console.error('handleEvent error:', { eventType, msgId, error: String(e) });
   }
 }
@@ -255,6 +295,37 @@ async function handleEvent(eventType: string, d: any, env: Env) {
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    // 调试接口（不依赖 wrangler tail；需在环境变量里设置 DEBUG_KEY，且建议绑定 KV 才有事件记录）
+    if (url.pathname === '/qq/debug' && request.method === 'GET') {
+      if (!env.DEBUG_KEY || url.searchParams.get('key') !== env.DEBUG_KEY) {
+        return new Response('Not Found', { status: 404 });
+      }
+      const secret = env.QQ_BOT_SECRET || env.QQ_APP_SECRET;
+      let events: DebugEntry[] | null = null;
+      if (env.KV) {
+        const raw = await env.KV.get('debug:events');
+        events = raw ? JSON.parse(raw) : [];
+      }
+      const result: Record<string, unknown> = {
+        now: new Date().toISOString(),
+        kvBound: Boolean(env.KV),
+        secretConfigured: Boolean(secret),
+        secretLength: secret?.length ?? 0,
+        secretFingerprint: secret ? await fingerprint(secret) : null,
+        events,
+      };
+      if (url.searchParams.get('selftest') === '1') {
+        try {
+          const token = await getAccessToken(env);
+          result.token = { ok: true, length: token.length };
+        } catch (e) {
+          result.token = { ok: false, error: String(e) };
+        }
+      }
+      return Response.json(result, { headers: { 'Cache-Control': 'no-store' } });
+    }
+
     if (url.pathname !== '/qq/webhook' || request.method !== 'POST') {
       return new Response('Not Found', { status: 404 });
     }
