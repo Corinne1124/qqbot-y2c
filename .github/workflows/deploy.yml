@@ -1,4 +1,4 @@
-name: Deploy QQ Bot to Cloudflare Workers
+name: Deploy QQ Bot to Cloudflare Pages
 
 on:
   push:
@@ -11,6 +11,12 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      PAGES_PROJECT: qqbot-y2c
+      # 可选：在仓库 Secrets 里配上这三个后，每次推送会先同步密钥再部署
+      QQ_APP_ID: ${{ secrets.QQ_APP_ID }}
+      QQ_APP_SECRET: ${{ secrets.QQ_APP_SECRET }}
+      QQ_BOT_SECRET: ${{ secrets.QQ_BOT_SECRET }}
+      HAS_BOT_SECRETS: ${{ secrets.QQ_APP_ID != '' && secrets.QQ_APP_SECRET != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,8 +26,22 @@ jobs:
       - run: npm ci
       - name: Typecheck
         run: npx tsc --noEmit
-      - name: Deploy with Wrangler
+      - name: Build
+        run: npm run build
+      - name: Ensure Pages project exists
+        run: npx wrangler pages project create "$PAGES_PROJECT" --production-branch=main --compatibility-date=2025-12-01 || true
+      - name: Sync secrets to Cloudflare Pages
+        if: env.HAS_BOT_SECRETS == 'true'
+        run: |
+          {
+            printf 'QQ_APP_ID=%s\n' "$QQ_APP_ID"
+            printf 'QQ_APP_SECRET=%s\n' "$QQ_APP_SECRET"
+            if [ -n "$QQ_BOT_SECRET" ]; then printf 'QQ_BOT_SECRET=%s\n' "$QQ_BOT_SECRET"; fi
+          } > .dev.vars
+          npx wrangler pages secret bulk .dev.vars --project-name="$PAGES_PROJECT"
+      - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=${{ env.PAGES_PROJECT }} --commit-dirty=true

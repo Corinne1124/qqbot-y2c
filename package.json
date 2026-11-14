@@ -4,10 +4,11 @@
   "private": true,
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "secrets:push": "wrangler secret bulk .dev.vars",
-    "tail": "wrangler tail",
-    "build": "echo 'Build step is not required for now.'"
+    "build": "node scripts/build-pages.mjs",
+    "deploy": "npm run build && wrangler pages deploy dist --project-name qqbot-y2c --commit-dirty=true",
+    "deploy:worker": "wrangler deploy",
+    "secrets:push": "wrangler pages secret bulk .dev.vars --project-name qqbot-y2c",
+    "tail": "wrangler pages deployment tail --project-name qqbot-y2c"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250214.0",

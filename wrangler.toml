@@ -1,3 +1,7 @@
+# 本文件仅用于：
+#   1) `wrangler dev` 本地开发
+#   2) `npm run deploy:worker`（Workers 备用部署，入口为 *.workers.dev，国内不可用）
+# 线上主部署走 Cloudflare Pages，见 README。
 name = "qqbot-y2c"
 main = "src/index.ts"
 compatibility_date = "2025-12-01"
