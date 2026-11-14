@@ -8,9 +8,9 @@ compatibility_date = "2025-12-01"
 # id = "your_kv_id_here"
 
 # 以下变量通过 wrangler secret 设置，不要写在文件中
-# QQ_APP_ID
-# QQ_APP_SECRET
-# BOT_SECRET
+# QQ_APP_ID      机器人 ID（AppID）
+# QQ_APP_SECRET  换取 access_token 用的 OAuth client_secret
+# QQ_BOT_SECRET  Webhook 验签用的 Ed25519 种子
 
 [env.production]
 vars = { ENVIRONMENT = "production" }
