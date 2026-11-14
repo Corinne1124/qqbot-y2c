@@ -226,18 +226,27 @@ function sendGroupMessage(
 // ---------- 事件处理 ----------
 
 async function handleEvent(eventType: string, d: any, env: Env) {
+  const msgId = d?.id as string | undefined;
   try {
     const token = await getAccessToken(env);
     const content = String(d?.content ?? '').replace(/<@!?\d+>/g, '').trim();
     if (eventType === 'C2C_MESSAGE_CREATE') {
-      const ok = await sendC2CMessage(d.author.user_openid, `你说了：${content}`, d.id, token);
-      if (!ok) console.error(`Failed to reply C2C message: ${d.id}`);
+      const openid = d?.author?.user_openid;
+      if (!openid) throw new Error('missing d.author.user_openid');
+      const ok = await sendC2CMessage(openid, `你说了：${content}`, msgId, token);
+      if (ok) console.log('replied C2C', { msgId, openid });
+      else console.error('Failed to reply C2C message', { msgId, openid });
     } else if (eventType === 'GROUP_AT_MESSAGE_CREATE') {
-      const ok = await sendGroupMessage(d.group_openid, `你在群里说：${content}`, d.id, token);
-      if (!ok) console.error(`Failed to reply group message: ${d.id}`);
+      const groupOpenid = d?.group_openid;
+      if (!groupOpenid) throw new Error('missing d.group_openid');
+      const ok = await sendGroupMessage(groupOpenid, `你在群里说：${content}`, msgId, token);
+      if (ok) console.log('replied GROUP', { msgId, groupOpenid });
+      else console.error('Failed to reply group message', { msgId, groupOpenid });
+    } else {
+      console.log('ignore event type', eventType);
     }
   } catch (e) {
-    console.error('handleEvent error:', e);
+    console.error('handleEvent error:', { eventType, msgId, error: String(e) });
   }
 }
 
@@ -305,6 +314,7 @@ export default {
 
     // 正常事件 (op=0)
     if (payload.op === 0) {
+      console.log('event received', { type: payload.t, id: payload.d?.id });
       ctx.waitUntil(handleEvent(payload.t, payload.d, env));
       return new Response(null, { status: 204 });
     }
